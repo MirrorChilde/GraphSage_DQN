@@ -40,7 +40,13 @@ class myModel(tf.keras.Model):
         self.built = True
 
     @tf.function
-    def call(self, states_action, states_graph_ids, states_first, states_second, sates_num_edges, training=False):
+    def call(self,
+             states_action,
+             states_graph_ids,
+             states_first,
+             states_second,
+             sates_num_edges,
+             training=False):
         # Define the forward pass
         link_state = states_action
 

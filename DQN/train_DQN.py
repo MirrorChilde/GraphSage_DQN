@@ -16,6 +16,7 @@ from collections import deque
 import multiprocessing
 import time as tt
 import glob
+from util.utils import save_reward,save_throughput
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
@@ -103,6 +104,8 @@ class DQNAgent:
         and predicts the q_values of the K=4 different new graph states by using the GNN model.
         Picks the state according to epsilon-greedy approach. The flag=TRUE indicates that we are testing
         the model and thus, it won't activate the drop layers.
+        给定一个存储在环境中的需求，它在当前 "状态 "上分配了K=4条最短路径并通过使用GNN模型预测K=4个不同的新图形状态的q_values。
+		根据epsilon-greedy方法选择状态。标志=TRUE表示我们正在测试模型，因此，它将不会激活下降层。
         """
         # Set to True if we need to compute K=4 q-values and take the maxium
         takeMax_epsilon = False
@@ -110,7 +113,7 @@ class DQNAgent:
         listGraphs = []
         # List of graph features that are used in the cummax() call
         list_k_features = list()
-        # Initialize action
+        # Initialize action 初始化动作
         action = 0
 
         # We get the K-paths between source-destination
@@ -143,6 +146,7 @@ class DQNAgent:
             j = 1
 
             # 3. Iterate over paths' pairs of nodes and allocate demand to bw_allocated
+			# 遍历路径上的成对节点，将需求分配给bw_allocated
             while (j < len(currentPath)):
                 state_copy[env.edgesDict[str(currentPath[i]) + ':' + str(currentPath[j])]][1] = demand
                 i = i + 1
@@ -257,7 +261,7 @@ class DQNAgent:
         return prediction_state, preds_next_target
 
     def _train_step(self, batch):
-        # Record operations for automatic differentiation
+        # Record operations for automatic differentiation 记录自动微分的操作
         with tf.GradientTape() as tape:
             preds_state = []
             target = []
@@ -349,11 +353,13 @@ class DQNAgent:
         
         # We store the state with the action marked, the graph ids, first, second, num_edges, the reward, 
         # new_state(-1 because we don't need it in this case), the graph ids, done, first, second, number of edges
-        self.memory.append((state_action['link_state'], state_action['graph_id'], state_action['first'], # 2
+        self.memory.append(
+                        (state_action['link_state'], state_action['graph_id'], state_action['first'], # 2
                         state_action['second'], tf.convert_to_tensor(state_action['num_edges']), # 4
                         tf.convert_to_tensor(reward, dtype=tf.float32), tensors['link_state'], tensors['graph_id'], # 7
                         tf.convert_to_tensor(int(done==True), dtype=tf.float32), tensors['first'], tensors['second'], # 10 
                         tf.convert_to_tensor(tensors['num_edges']))) # 12
+
 
 if __name__ == "__main__":
     # python train_DQN.py
@@ -379,8 +385,7 @@ if __name__ == "__main__":
     if not os.path.exists("./Logs"):
         os.makedirs("./Logs")
 
-    # We store all the information in a Log file and later we parse this file 
-    # to extract all the relevant information
+    # 我们将所有信息存储在一个日志文件中，随后我们解析这个文件以提取所有相关信息
     fileLogs = open("./Logs/exp" + differentiation_str + "Logs.txt", "a")
 
     if not os.path.exists(checkpoint_dir):
@@ -391,9 +396,18 @@ if __name__ == "__main__":
 
     rewards_test = np.zeros(EVALUATION_EPISODES)
 
+    demandlist = np.zeros(EVALUATION_EPISODES)
+    min_utilization = np.zeros(EVALUATION_EPISODES)
+    mean_utilization = np.zeros(EVALUATION_EPISODES)
+
     for eps in range(EVALUATION_EPISODES):
         state, demand, source, destination = env_eval.reset()
         rewardAddTest = 0
+        # ---------------------------------#
+        alldemand = 0
+        u = []
+        min_u = np.zeros(1)
+        # ---------------------------------#
         while 1:
             # We execute evaluation over current state
             # demand, src, dst
@@ -404,9 +418,24 @@ if __name__ == "__main__":
             state = new_state
             if done:
                 break
-        rewards_test[eps] = rewardAddTest
+        # ---------------------------------#
+        # 获取剩余带宽
+        a = 0
+        for i in (0, env_training.numEdges - 1):
+            a = (200 - state[i][0]) / 200
+            if (a > 1): a = 1.0
+            u.append(a)
+        u = np.array(u)
+        min_u = np.mean(u)
+        u = np.mean(u)
 
+        demandlist[eps] = alldemand
+        mean_utilization[eps] = u
+        min_utilization[eps] = min_u
+        # ---------------------------------#
+        rewards_test[eps] = rewardAddTest
     evalMeanReward = np.mean(rewards_test)
+
     fileLogs.write(">," + str(evalMeanReward) + ",\n")
     fileLogs.write("-," + str(agent.epsilon) + ",\n")
     fileLogs.flush()
@@ -414,8 +443,11 @@ if __name__ == "__main__":
     counter_store_model = 1
 
     for ep_it in range(ITERATIONS):
-        if ep_it%5==0:
-            print("Training iteration: ", ep_it)
+        print("Training iteration: ", ep_it,evalMeanReward)
+        save_reward('DQN-' + str(graph_topology), ep_it, evalMeanReward)
+        # if ep_it%5==0:
+        #     print("Training iteration: ", ep_it)
+        #     save_reward('DQN-' + str(graph_topology), ep_it, evalMeanReward)
 
         if ep_it==0:
             # At the beginning we don't have any experiences in the buffer. Thus, we force to
@@ -450,20 +482,44 @@ if __name__ == "__main__":
             agent.epsilon *= agent.epsilon_decay
 
         # We only evaluate the model every evaluation_interval steps
+        # 我们只在长度为evaluation_interval的间隔里评估一次模型
         if ep_it % evaluation_interval == 0:
             for eps in range(EVALUATION_EPISODES):
                 state, demand, source, destination = env_eval.reset()
                 rewardAddTest = 0
+                #----------------------------#
+                alldemand = 0 #总流量
+                u = []
+                min_u = np.zeros(1)
+                # ----------------------------#
                 while 1:
                     # We execute evaluation over current state
                     action, _ = agent.act(env_eval, state, demand, source, destination, True)
-                    
+
+                    # 获取吞吐量
+                    alldemand += demand
+
                     new_state, reward, done, demand, source, destination = env_eval.make_step(state, action, demand, source, destination)
                     rewardAddTest = rewardAddTest + reward
                     state = new_state
                     if done:
                         break
+
+                # 获取剩余带宽
+                a = 0
+                for i in (0, env_training.numEdges - 1):
+                    a = (200 - state[i][0]) / 200
+                    if (a > 1): a = 1.0
+                    u.append(a)
+                u = np.array(u)
+                min_u = np.mean(u)
+                u = np.mean(u)
+
+                demandlist[eps] = alldemand
+                mean_utilization[eps] = u
+                min_utilization[eps] = min_u
                 rewards_test[eps] = rewardAddTest
+
             evalMeanReward = np.mean(rewards_test)
 
             if evalMeanReward>max_reward:
@@ -483,26 +539,52 @@ if __name__ == "__main__":
         # Invoke garbage collection
         # tf.keras.backend.clear_session()
         gc.collect()
-    
+
     for eps in range(EVALUATION_EPISODES):
         state, demand, source, destination = env_eval.reset()
         rewardAddTest = 0
+        # ---------------------------------#
+        alldemand = 0
+        u = []
+        min_u = np.zeros(1)
+        # ---------------------------------#
         while 1:
             # We execute evaluation over current state
             # demand, src, dst
             action, _ = agent.act(env_eval, state, demand, source, destination, True)
-            
+
+            # ---------------------------------#
+            # 获取吞吐量
+            alldemand += demand
+            # ---------------------------------#
+
             new_state, reward, done, demand, source, destination = env_eval.make_step(state, action, demand, source, destination)
             rewardAddTest = rewardAddTest + reward
             state = new_state
             if done:
                 break
+        # ---------------------------------#
+        # 获取剩余带宽
+        a = 0
+        for i in (0, env_training.numEdges - 1):
+            a = (200 - state[i][0]) / 200
+            if (a > 1): a = 1.0
+            u.append(a)
+        u = np.array(u)
+        min_u = np.mean(u)
+        u = np.mean(u)
+
+        demandlist[eps] = alldemand
+        mean_utilization[eps] = u
+        min_utilization[eps] = min_u
+        # ---------------------------------#
         rewards_test[eps] = rewardAddTest
     evalMeanReward = np.mean(rewards_test)
 
     if evalMeanReward>max_reward:
         max_reward = evalMeanReward
         reward_id = counter_store_model
+
 
     fileLogs.write(">," + str(evalMeanReward) + ",\n")
     fileLogs.write("-," + str(agent.epsilon) + ",\n")
